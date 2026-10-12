@@ -276,6 +276,13 @@ body.is-exam #stage{opacity:.16}
 .res-hero h1{font-size:clamp(30px,3.8vw,52px);font-weight:650;letter-spacing:-.05em;line-height:1.12;margin:14px 0 12px;text-wrap:balance}
 .res-hero p{color:var(--fg2);margin:0;max-width:36em}
 .res-actions{display:flex;flex-wrap:wrap;gap:10px;margin-top:22px}
+.sendbox{display:flex;flex-wrap:wrap;align-items:center;gap:10px 12px;margin-top:16px;font-size:14px;color:var(--fg2)}
+.sendbox .dot{flex:none}
+.sendbox.wait .dot{background:var(--fg3);box-shadow:none;animation:pulse 1s ease-in-out infinite}
+.sendbox.ok .dot{background:var(--mint);box-shadow:0 0 10px var(--mint)}
+.sendbox.fail{color:var(--bad)}
+.sendbox.fail .dot{background:var(--bad);box-shadow:0 0 10px var(--bad)}
+@keyframes pulse{50%{opacity:.3}}
 .stats{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));border-top:1px solid var(--line2);border-bottom:1px solid var(--line2);margin-bottom:56px}
 .stats>div{padding:18px 18px 18px 0;display:flex;flex-direction:column;gap:4px;min-width:0}
 .stats>div+div{padding-left:18px;border-left:1px solid var(--line)}
@@ -528,6 +535,7 @@ textarea.copybox{position:fixed;left:-9999px;top:0}
           <button class="btn sm" type="button" id="toReview">해설 보기</button>
           <button class="btn sm" type="button" id="restartBtn">처음부터 다시</button>
         </div>
+        <div class="sendbox" id="sendBox" hidden role="status" aria-live="polite"><span class="dot"></span><span id="sendTxt"></span><button class="btn sm" type="button" id="resendBtn" hidden>다시 보내기</button></div>
       </div>
     </section>
 
@@ -705,6 +713,11 @@ const Q = [
   e:"mainloop() 은 창을 화면에 유지하면서 클릭·입력 같은 이벤트를 기다리는 반복을 시작합니다. 이 줄이 없으면 창이 뜨자마자 프로그램이 끝납니다."}
 ];
 const TOTAL = Q.length, LIMIT = 40 * 60;
+
+/* ── 결과 제출 (구글 스프레드시트) ──
+   Apps Script 웹 앱을 배포하고 나온 주소(https://script.google.com/macros/s/…/exec)를
+   아래 따옴표 안에 붙여넣으세요. 비워 두면 제출 기능은 꺼지고 '결과 복사하기'만 남습니다. */
+const SUBMIT_URL = "https://script.google.com/macros/s/AKfycbzv0_rncyHkgLzxYBXCr3JeIuYJLofhHOPJ_envzd6T0-g5Ek2vVdOqXp9mUp1pN14Z/exec";
 
 /* ── 유틸 ── */
 const $ = s => document.querySelector(s);
@@ -1075,7 +1088,60 @@ function showResult(){
     "오답 " + no + " · 모르겠어요/미응답 " + uk,
     "복습할 일차: " + (weak.length ? weak.map(k => (UNITS[k].t==="P1"?"P1-":"P2-") + UNITS[k].d.join("·") + "일차 " + UNITS[k].n).join(", ") : "없음")
   ].join("\n");
+
+  /* 스프레드시트로 보낼 내용 */
+  if (!S.id){ S.id = S.start.toString(36).toUpperCase() + "-" + Math.random().toString(36).slice(2,6).toUpperCase(); save(); }
+  const wrongNos = g.map((st,i) => st === "no" ? i+1 : null).filter(Boolean);
+  const perQ = Q.map((q,i) => {
+    const n = String(i+1).padStart(2,"0"), st = g[i];
+    if (st === "ok") return n + " O";
+    if (st === "uk") return n + " 모름";
+    if (st === "na") return n + " 미응답";
+    return n + " X(" + (q.type === "mc" ? (S.ans[i]+1) + "번" : String(S.ans[i]).trim().slice(0,20)) + ")";
+  }).join(" | ");
+  lastPayload = {
+    id: S.id, name: S.name, started: ds,
+    duration: mm + "분 " + ss + "초", score: score, verdict: tier.v,
+    ok: ok, no: no, unknown: uk,
+    p1: t1.ok + "/" + t1.n, p2: t2.ok + "/" + t2.n,
+    weak: weak.length ? weak.map(k => (UNITS[k].t==="P1"?"P1-":"P2-") + UNITS[k].d.join("·") + "일차 " + UNITS[k].n).join(", ") : "없음",
+    wrongList: wrongNos.length ? wrongNos.join(", ") : "없음",
+    answers: perQ
+  };
+  if (S.sentAt) sendState("ok", "선생님께 제출했습니다 · " + S.sentAt);
+  else submitResult();
 }
+
+let lastPayload = null, sending = false;
+function sendState(kind, msg){
+  const box = $("#sendBox");
+  box.hidden = false; box.className = "sendbox " + kind;
+  $("#sendTxt").textContent = msg;
+  $("#resendBtn").hidden = kind !== "fail";
+}
+async function submitResult(){
+  if (!SUBMIT_URL){ $("#sendBox").hidden = true; return; }
+  if (!lastPayload || sending) return;
+  sending = true;
+  sendState("wait", "선생님께 결과를 보내는 중입니다");
+  const body = JSON.stringify(lastPayload);
+  const done = () => {
+    const t = new Date();
+    S.sentAt = String(t.getHours()).padStart(2,"0") + ":" + String(t.getMinutes()).padStart(2,"0");
+    save(); sendState("ok", "선생님께 제출했습니다 · " + S.sentAt);
+  };
+  try {
+    const r = await fetch(SUBMIT_URL, {method:"POST", body});
+    const j = await r.json();
+    if (j && j.ok) done();
+    else sendState("fail", "제출하지 못했습니다. 다시 보내기를 누르거나, 결과 복사하기로 보내 주세요.");
+  } catch (e) {
+    /* 응답을 읽지 못하는 환경 대비: 한 번 더 보내기 (같은 응시ID는 시트에서 한 번만 기록됨) */
+    try { await fetch(SUBMIT_URL, {method:"POST", mode:"no-cors", body}); done(); }
+    catch (e2) { sendState("fail", "인터넷 연결 문제로 제출하지 못했습니다. 연결을 확인하고 다시 보내기를 눌러 주세요."); }
+  } finally { sending = false; }
+}
+$("#resendBtn").addEventListener("click", submitResult);
 function renderReview(g, f){
   const list = Q.map((q,i) => ({q,i,s:g[i]})).filter(x => f === "all" || x.s !== "ok");
   if (!list.length){ $("#rv").innerHTML = '<div class="glass rvi"><p class="exp">틀린 문항이 없습니다.</p></div>'; return; }
@@ -1101,7 +1167,7 @@ let restartArm = false;
 $("#restartBtn").addEventListener("click", e => {
   if (!restartArm){ restartArm = true; e.currentTarget.textContent = "한 번 더 누르면 초기화"; setTimeout(() => { restartArm = false; $("#restartBtn").textContent = "처음부터 다시"; }, 3000); return; }
   store.del("pyexam-state"); S = null; restartArm = false; $("#restartBtn").textContent = "처음부터 다시";
-  $("#resumeBtn").hidden = true; $("#nameIn").value = ""; show("#sIntro");
+  $("#resumeBtn").hidden = true; $("#nameIn").value = ""; $("#sendBox").hidden = true; lastPayload = null; show("#sIntro");
 });
 
 /* ── 스크롤: 상단바 · 배경 · 하단바 ── */
